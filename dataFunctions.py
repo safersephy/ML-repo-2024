@@ -1,3 +1,107 @@
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+import polars as pl
+import pandas as pd
+import numpy as np
+from datetime import datetime,date
+import matplotlib.pyplot as plt
+from pytorch_forecasting import TimeSeriesDataSet, GroupNormalizer
+from pytorch_forecasting.data.encoders import NaNLabelEncoder
+from lightning.pytorch.tuner import Tuner
+from darts import TimeSeries
+from darts.dataprocessing.transformers.static_covariates_transformer import StaticCovariatesTransformer 
+from darts.dataprocessing.transformers import Scaler
+from joblib import Parallel, delayed
+from darts.models import NaiveSeasonal
+from darts.metrics import mape,smape,rmse
+
+def _backtests_local_estimator(_estimator, _ts_set, _horizons):
+    model = _estimator
+    model.fit(_ts_set)
+    backtests_single_ts = model.predict(_horizons)
+    return backtests_single_ts
+
+
+def createdatasetDarts(df,samplesize = 378,max_prediction_length = 7):
+
+
+
+
+    max_encoder_length = 45
+
+    df['Date'] = pd.to_datetime(df['Date'])
+
+    training_cutoff = df["dayindex"].max() - max_prediction_length
+
+    df_train = df[lambda x: x.dayindex <= training_cutoff]
+
+    ts_train = df_train[['groupId','Date','target']].copy()
+    ts_val = df[['groupId','Date','target']].copy()
+
+    ts_train = TimeSeries.from_group_dataframe(df=ts_train, 
+                                                group_cols=['groupId'],
+                                                time_col='Date', 
+                                                value_cols='target',
+                                                fill_missing_dates=True,
+                                                freq='D',
+                                                fillna_value=0
+                                                )
+
+
+    ts_val = TimeSeries.from_group_dataframe(df=ts_val, 
+                                                group_cols=['groupId'],
+                                                time_col='Date', 
+                                                value_cols='target',
+                                                fill_missing_dates=True,
+                                                freq='D',
+                                                fillna_value=0
+                                                
+                                                )
+
+
+
+    transformer = StaticCovariatesTransformer()
+    ts_train = transformer.fit_transform(ts_train)
+    ts_val = transformer.transform(ts_val)
+
+
+
+
+    scaler = Scaler() # MinMaxScaler
+    ts_train_prepared = scaler.fit_transform(ts_train)
+    ts_val_prepared = scaler.transform(ts_val)
+
+
+    def get_overall_rmse(prediction_series, val_series):
+        return np.round(np.mean(rmse(actual_series=val_series, 
+                                    pred_series=prediction_series, n_jobs=-1)),
+                        2)
+
+
+    backtests_baseline_model = Parallel(n_jobs=-1,
+                                        verbose=5, 
+                                        backend = 'multiprocessing',
+                                        pre_dispatch='1.5*n_jobs')(
+            delayed(_backtests_local_estimator)(
+                _estimator=NaiveSeasonal(K=7),
+                _ts_set=single_ts_set,
+                _horizons=max_prediction_length,
+            )
+        for single_ts_set in ts_train
+    )
+        
+    print(f'overall baseline rmse: {get_overall_rmse(backtests_baseline_model, ts_val)}')
+
+    sample = np.random.randint(0,samplesize,)
+    fig, ax = plt.subplots(figsize=(30, 10))
+    ts_val[sample].plot(label='True value', color='black')
+    backtests_baseline_model[sample][:8].plot(label='Baseline', color='purple')
+    plt.show()
+
+
+
+
+    return ts_train_prepared, ts_val_prepared, backtests_baseline_model
 
 def createDatasetLightning(df,varLengths = True,max_prediction_length = 7):
     min_prediction_length = 1
